@@ -1,18 +1,42 @@
-﻿using Microsoft.AspNetCore.Mvc.ApiExplorer;
+﻿using System.Linq;
+using System.Reflection;
+using Microsoft.AspNetCore.Mvc.ApiExplorer;
+using Microsoft.AspNetCore.Mvc.Controllers;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace Swashbuckle.AspNetCore.SwaggerGen
 {
     public static class ApiParameterDescriptionExtensions
     {
-        public static bool IsPartOfCancellationToken(this ApiParameterDescription parameterDescription)
+        internal static bool TryGetParameterInfo(
+            this ApiParameterDescription apiParameterDescription,
+            ApiDescription apiDescription,
+            out ParameterInfo parameterInfo)
         {
-            if (parameterDescription.Source != BindingSource.ModelBinding) return false;
+            var controllerParameterDescriptor = apiDescription.ActionDescriptor.Parameters
+                .OfType<ControllerParameterDescriptor>()
+                .FirstOrDefault(descriptor =>
+                {
+                    return (apiParameterDescription.Name == descriptor.BindingInfo?.BinderModelName)
+                        || (apiParameterDescription.Name == descriptor.Name);
+                });
 
-            var name = parameterDescription.Name;
-            return name == "CanBeCanceled"
-                || name == "IsCancellationRequested"
-                || name.StartsWith("WaitHandle.");
+            parameterInfo = controllerParameterDescriptor?.ParameterInfo;
+
+            return (parameterInfo != null);
+        }
+
+        internal static bool TryGetPropertyInfo(
+            this ApiParameterDescription apiParameterDescription,
+            out PropertyInfo propertyInfo)
+        {
+            var modelMetadata = apiParameterDescription.ModelMetadata;
+
+            propertyInfo = (modelMetadata?.ContainerType != null)
+                ? modelMetadata.ContainerType.GetProperty(modelMetadata.PropertyName)
+                : null;
+
+            return (propertyInfo != null);
         }
     }
 }

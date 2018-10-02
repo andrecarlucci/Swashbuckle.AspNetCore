@@ -3,7 +3,6 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.PlatformAbstractions;
 using Newtonsoft.Json.Serialization;
 using Swashbuckle.AspNetCore.Swagger;
 using Basic.Swagger;
@@ -46,17 +45,26 @@ namespace Basic
                     }
                 );
 
+                c.ParameterFilter<TestParameterFilter>();
+
                 c.OperationFilter<AssignOperationVendorExtensions>();
                 c.OperationFilter<FormDataOperationFilter>();
 
+                c.DescribeAllEnumsAsStrings();
+
+                c.SchemaFilter<ExamplesSchemaFilter>();
+
                 //c.DescribeAllParametersInCamelCase();
+
+                c.EnableAnnotations();
             });
 
             if (_hostingEnv.IsDevelopment())
             {
                 services.ConfigureSwaggerGen(c =>
                 {
-                    c.IncludeXmlComments(GetXmlCommentsPath(PlatformServices.Default.Application));
+                    var xmlCommentsPath = Path.Combine(System.AppContext.BaseDirectory, "Basic.xml");
+                    c.IncludeXmlComments(xmlCommentsPath, true);
                 });
             }
         }
@@ -80,13 +88,10 @@ namespace Basic
 
             app.UseSwaggerUI(c =>
             {
+                c.RoutePrefix = ""; // serve the UI at root
                 c.SwaggerEndpoint("/swagger/v1/swagger.json", "V1 Docs");
+                c.DisplayOperationId();
             });
-        }
-
-        private string GetXmlCommentsPath(ApplicationEnvironment appEnvironment)
-        {
-            return Path.Combine(appEnvironment.ApplicationBasePath, "Basic.xml");
         }
     }
 }

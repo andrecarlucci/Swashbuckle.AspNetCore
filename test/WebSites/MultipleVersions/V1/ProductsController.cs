@@ -10,19 +10,13 @@ namespace MultipleVersions.V1
     public class ProductsController
     {
         [HttpGet]
-        public IEnumerable<Product> GetAll()
+        public IEnumerable<Product> GetProducts()
         {
             return new[]
             {
                 new Product { Id = 1, Description = "A product" },
                 new Product { Id = 2, Description = "Another product" },
             };
-        }
-
-        [HttpGet("{id}")]
-        public Product GetById(int id)
-        {
-            return new Product { Id = id, Description = "A product" };
         }
     }
 

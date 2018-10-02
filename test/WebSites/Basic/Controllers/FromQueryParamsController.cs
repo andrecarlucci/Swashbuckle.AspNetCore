@@ -1,5 +1,7 @@
 ﻿using System.Collections.Generic;
 using Microsoft.AspNetCore.Mvc;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel;
 
 namespace Basic.Controllers
 {
@@ -24,11 +26,13 @@ namespace Basic.Controllers
         /// <summary>
         /// 3-letter ISO country code
         /// </summary>
+        [Required]
         public string Country { get; set; }
 
         /// <summary>
         /// Name of city
         /// </summary>
+        [DefaultValue("Seattle")]
         public string City { get; set; }
     }
 }

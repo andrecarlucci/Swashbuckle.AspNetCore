@@ -4,6 +4,7 @@ using System.Linq;
 using System.Collections.ObjectModel;
 using System.Reflection;
 using System.Buffers;
+using System.Threading;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Routing;
@@ -19,16 +20,19 @@ using Microsoft.AspNetCore.Mvc.ModelBinding;
 using Microsoft.AspNetCore.Mvc.ModelBinding.Metadata;
 using Microsoft.AspNetCore.Mvc.Internal;
 using Microsoft.AspNetCore.Mvc.DataAnnotations.Internal;
+using Microsoft.Extensions.ObjectPool;
+using Microsoft.AspNetCore.Mvc.DataAnnotations;
+using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Http;
 using Moq;
 using Newtonsoft.Json;
-using Microsoft.Extensions.ObjectPool;
-using Microsoft.AspNetCore.Mvc.Filters;
 
 namespace Swashbuckle.AspNetCore.SwaggerGen.Test
 {
     public class FakeApiDescriptionGroupCollectionProvider : IApiDescriptionGroupCollectionProvider
     {
         private readonly List<ControllerActionDescriptor> _actionDescriptors;
+        private ApiDescriptionGroupCollection _apiDescriptionGroupCollection;
 
         public FakeApiDescriptionGroupCollectionProvider()
         {
@@ -38,12 +42,11 @@ namespace Swashbuckle.AspNetCore.SwaggerGen.Test
         public FakeApiDescriptionGroupCollectionProvider Add(
             string httpMethod,
             string routeTemplate,
-            string actionFixtureName,
-            string controllerFixtureName = "NotAnnotated"
-        )
+            string actionName,
+            Type controllerType = null)
         {
-            _actionDescriptors.Add(
-                CreateActionDescriptor(httpMethod, routeTemplate, actionFixtureName, controllerFixtureName));
+            controllerType = controllerType ?? typeof(FakeController);
+            _actionDescriptors.Add(CreateActionDescriptor(httpMethod, routeTemplate, controllerType, actionName));
             return this;
         }
 
@@ -51,51 +54,67 @@ namespace Swashbuckle.AspNetCore.SwaggerGen.Test
         {
             get
             {
-                var apiDescriptions = GetApiDescriptions();
-                var group = new ApiDescriptionGroup("default", apiDescriptions);
-                return new ApiDescriptionGroupCollection(new[] { group }, 1);
+                if (_apiDescriptionGroupCollection == null)
+                {
+                    var apiDescriptions = GetApiDescriptions();
+                    var group = new ApiDescriptionGroup("default", apiDescriptions);
+                    _apiDescriptionGroupCollection = new ApiDescriptionGroupCollection(new[] { group }, 1);
+                }
+
+                return _apiDescriptionGroupCollection;
             }
         }
 
         private ControllerActionDescriptor CreateActionDescriptor(
             string httpMethod,
             string routeTemplate,
-            string actionFixtureName,
-            string controllerFixtureName
-        )
+            Type controllerType,
+            string actionName)
         {
             var descriptor = new ControllerActionDescriptor();
+
             descriptor.SetProperty(new ApiDescriptionActionData());
 
             descriptor.ActionConstraints = new List<IActionConstraintMetadata>();
             if (httpMethod != null)
                 descriptor.ActionConstraints.Add(new HttpMethodActionConstraint(new[] { httpMethod }));
 
-            descriptor.AttributeRouteInfo = new AttributeRouteInfo { Template = routeTemplate };
-
-            descriptor.MethodInfo = typeof(FakeActions).GetMethod(actionFixtureName);
+            descriptor.MethodInfo = controllerType.GetMethod(actionName);
             if (descriptor.MethodInfo == null)
                 throw new InvalidOperationException(
-                    string.Format("{0} is not declared in ActionFixtures", actionFixtureName));
+                    string.Format("{0} is not declared in {1}", actionName, controllerType));
 
-            descriptor.Parameters = descriptor.MethodInfo.GetParameters()
-                .Select(paramInfo => new ParameterDescriptor
-                    {
-                        Name = paramInfo.Name,
-                        ParameterType = paramInfo.ParameterType,
-                        BindingInfo = BindingInfo.GetBindingInfo(paramInfo.GetCustomAttributes(false))
-                    })
-                .ToList();
+            descriptor.Parameters = new List<ParameterDescriptor>();
+            foreach (var parameterInfo in descriptor.MethodInfo.GetParameters())
+            {
+                descriptor.Parameters.Add(new ControllerParameterDescriptor
+                {
+                    Name = parameterInfo.Name,
+                    ParameterType = parameterInfo.ParameterType,
+                    ParameterInfo = parameterInfo,
+                    BindingInfo = BindingInfo.GetBindingInfo(parameterInfo.GetCustomAttributes(false))
+                });
+            };
 
-            var controllerType = typeof(FakeControllers).GetNestedType(controllerFixtureName, BindingFlags.Public | BindingFlags.Static | BindingFlags.Instance);
-            if (controllerType == null)
-                throw new InvalidOperationException(
-                    string.Format("{0} is not declared in ControllerFixtures", controllerFixtureName));
             descriptor.ControllerTypeInfo = controllerType.GetTypeInfo();
 
             descriptor.FilterDescriptors = descriptor.MethodInfo.GetCustomAttributes<ProducesResponseTypeAttribute>()
-                .Select((filter) => new FilterDescriptor(filter, FilterScope.Action))
+                .Select((filter) => new Microsoft.AspNetCore.Mvc.Filters.FilterDescriptor(filter, FilterScope.Action))
                 .ToList();
+
+            descriptor.RouteValues = new Dictionary<string, string> {
+                { "controller", controllerType.Name.Replace("Controller", string.Empty) }
+            };
+
+            var httpMethodAttribute = descriptor.MethodInfo.GetCustomAttributes()
+                .OfType<HttpMethodAttribute>()
+                .FirstOrDefault();
+
+            descriptor.AttributeRouteInfo = new AttributeRouteInfo
+            {
+                Template = httpMethodAttribute?.Template ?? routeTemplate,
+                Name = httpMethodAttribute?.Name
+            };
 
             return descriptor;
         }
@@ -108,16 +127,13 @@ namespace Swashbuckle.AspNetCore.SwaggerGen.Test
             options.InputFormatters.Add(new JsonInputFormatter(Mock.Of<ILogger>(), new JsonSerializerSettings(), ArrayPool<char>.Shared, new DefaultObjectPoolProvider()));
             options.OutputFormatters.Add(new JsonOutputFormatter(new JsonSerializerSettings(), ArrayPool<char>.Shared));
 
-            var optionsAccessor = new Mock<IOptions<MvcOptions>>();
-            optionsAccessor.Setup(o => o.Value).Returns(options);
-
             var constraintResolver = new Mock<IInlineConstraintResolver>();
             constraintResolver.Setup(i => i.ResolveConstraint("int")).Returns(new IntRouteConstraint());
 
             var provider = new DefaultApiDescriptionProvider(
-                optionsAccessor.Object,
+                Options.Create(options),
                 constraintResolver.Object,
-                CreateDefaultProvider()
+                CreateModelMetadataProvider()
             );
 
             provider.OnProvidersExecuting(context);
@@ -125,31 +141,23 @@ namespace Swashbuckle.AspNetCore.SwaggerGen.Test
             return new ReadOnlyCollection<ApiDescription>(context.Results);
         }
 
-        public IModelMetadataProvider CreateDefaultProvider()
+        public IModelMetadataProvider CreateModelMetadataProvider()
         {
             var detailsProviders = new IMetadataDetailsProvider[]
             {
-                new DefaultBindingMetadataProvider(CreateMessageProvider()),
+                new DefaultBindingMetadataProvider(),
                 new DefaultValidationMetadataProvider(),
-                new DataAnnotationsMetadataProvider()
+                new DataAnnotationsMetadataProvider(
+                    Options.Create(new MvcDataAnnotationsLocalizationOptions()),
+                    null),
+                new BindingSourceMetadataProvider(typeof(CancellationToken), BindingSource.Special),
+                new BindingSourceMetadataProvider(typeof(IFormFile), BindingSource.FormFile),
+                new BindingSourceMetadataProvider(typeof(IFormFileCollection), BindingSource.FormFile),
+                new BindingSourceMetadataProvider(typeof(IEnumerable<IFormFile>), BindingSource.FormFile)
             };
 
             var compositeDetailsProvider = new DefaultCompositeMetadataDetailsProvider(detailsProviders);
-            return new DefaultModelMetadataProvider(compositeDetailsProvider);
-        }
-
-        private static ModelBindingMessageProvider CreateMessageProvider()
-        {
-            return new ModelBindingMessageProvider
-            {
-                MissingBindRequiredValueAccessor = name => $"A value for the '{ name }' property was not provided.",
-                MissingKeyOrValueAccessor = () => $"A value is required.",
-                ValueMustNotBeNullAccessor = value => $"The value '{ value }' is invalid.",
-                AttemptedValueIsInvalidAccessor = (value, name) => $"The value '{ value }' is not valid for { name }.",
-                UnknownValueIsInvalidAccessor = name => $"The supplied value is invalid for { name }.",
-                ValueIsInvalidAccessor = value => $"The value '{ value }' is invalid.",
-                ValueMustBeANumberAccessor = name => $"The field { name } must be a number.",
-            };
+            return new DefaultModelMetadataProvider(compositeDetailsProvider, Options.Create(new MvcOptions()));
         }
     }
 }
